@@ -751,10 +751,11 @@ def main():
     p_mutate.add_argument('-o', '--output', default='-', help='Output file')
     p_mutate.add_argument('-f', '--format', default='csv', choices=['csv', 'tsv', 'json', 'markdown', 'sql'], help='Output format')
     
+    fill_choices = ['ffill', 'bfill', 'value', 'mean']
     p_fill = subparsers.add_parser('fill', help='Fill missing values')
     p_fill.add_argument('file', nargs='?', default='-', help='Input CSV file')
     p_fill.add_argument('column', help='Column name')
-    p_fill.add_argument('method', choices=['ffill', 'bfill', 'value', 'mean'], help='Fill method')
+    p_fill.add_argument('method', choices=fill_choices, help='Fill method')
     p_fill.add_argument('-v', '--value', default='', help='Value for value method')
     p_fill.add_argument('-o', '--output', default='-', help='Output file')
     p_fill.add_argument('-f', '--format', default='csv', choices=['csv', 'tsv', 'json', 'markdown', 'sql'], help='Output format')
@@ -763,7 +764,7 @@ def main():
     p_split.add_argument('file', nargs='?', default='-', help='Input CSV file')
     p_split.add_argument('column', help='Column to split')
     p_split.add_argument('-s', '--separator', default=',', help='Separator')
-    p_split.add_argument('-n', '--new-columns', help='Comma-separated new column names')
+    p_split.add_argument('--new-columns', help='Comma-separated new column names')
     p_split.add_argument('-o', '--output', default='-', help='Output file')
     p_split.add_argument('-f', '--format', default='csv', choices=['csv', 'tsv', 'json', 'markdown', 'sql'], help='Output format')
     
