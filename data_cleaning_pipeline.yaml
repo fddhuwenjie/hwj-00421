@@ -1,0 +1,28 @@
+name: Data Cleaning Pipeline
+description: 数据清洗流程 - 处理缺失值、去重、格式修正
+steps:
+  - command: validate
+    params:
+      file: input.csv
+      threshold: 0.3
+      fix: true
+      output: cleaned_step1.csv
+  - command: fill
+    params:
+      file: cleaned_step1.csv
+      column: age
+      method: mean
+      output: cleaned_step2.csv
+  - command: fill
+    params:
+      file: cleaned_step2.csv
+      column: salary
+      method: median
+      output: cleaned_step3.csv
+  - command: unique
+    params:
+      file: cleaned_step3.csv
+      output: cleaned_final.csv
+  - command: describe
+    params:
+      file: cleaned_final.csv

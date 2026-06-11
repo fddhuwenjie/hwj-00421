@@ -1,0 +1,35 @@
+name: ETL Pipeline
+description: ETL转换流程 - 数据抽取、转换、加载
+steps:
+  - command: select
+    params:
+      file: raw_data.csv
+      columns: id,name,email,department,salary,hire_date
+      output: extracted.csv
+  - command: mutate
+    params:
+      file: extracted.csv
+      expressions: salary_bonus=salary*0.1,total_compensation=salary+salary_bonus
+      output: transformed1.csv
+  - command: sort
+    params:
+      file: transformed1.csv
+      columns: department,-salary
+      output: transformed2.csv
+  - command: join
+    params:
+      left: transformed2.csv
+      right: departments.csv
+      left_on: department
+      right_on: dept_id
+      how: left
+      output: joined_data.csv
+  - command: groupby
+    params:
+      file: joined_data.csv
+      group: department
+      agg: avg:salary,sum:salary_bonus,count:id
+      output: etl_final.csv
+  - command: describe
+    params:
+      file: etl_final.csv

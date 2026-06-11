@@ -1,0 +1,31 @@
+name: Statistics Report Pipeline
+description: 统计报表生成流程 - 分组统计、聚合计算
+steps:
+  - command: describe
+    params:
+      file: sales.csv
+  - command: groupby
+    params:
+      file: sales.csv
+      group: region,category
+      agg: sum:amount,avg:quantity,count:order_id
+      output: sales_summary.csv
+    save_variables:
+      summary_file: sales_summary.csv
+  - command: sort
+    params:
+      file: ${summary_file}
+      columns: amount_sum
+      output: sales_ranked.csv
+  - command: head
+    params:
+      file: sales_ranked.csv
+      n: 10
+  - command: pivot
+    params:
+      file: sales.csv
+      row: region
+      col: month
+      value: amount
+      agg: sum
+      output: sales_pivot.csv

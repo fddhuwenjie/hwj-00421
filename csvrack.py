@@ -7,9 +7,18 @@ import random
 import json
 import statistics
 import hashlib
+import subprocess
+import tempfile
 from collections import Counter
 from datetime import datetime
 import shutil
+
+try:
+    import yaml
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyyaml"])
+    import yaml
 
 def read_csv(filepath):
     if filepath == '-':
@@ -1066,6 +1075,516 @@ def cmd_mask(args):
     
     write_csv(rows, args.output, 'csv')
 
+def cmd_pipeline(args):
+    config_file = args.config
+    dry_run = args.dry_run
+    
+    with open(config_file, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    
+    steps = config.get('steps', [])
+    variables = {}
+    
+    print(f"Loaded pipeline with {len(steps)} steps")
+    
+    for i, step in enumerate(steps):
+        command = step.get('command')
+        params = step.get('params', {})
+        
+        step_vars = variables.copy()
+        
+        resolved_params = {}
+        for key, value in params.items():
+            if isinstance(value, str):
+                for var_name, var_value in step_vars.items():
+                    value = value.replace(f"${{{var_name}}}", str(var_value))
+            resolved_params[key] = value
+        
+        if dry_run:
+            print(f"\nStep {i+1}: {command}")
+            print(f"  Parameters: {resolved_params}")
+            continue
+        
+        print(f"\nExecuting step {i+1}: {command}...")
+        
+        class FakeArgs:
+            pass
+        
+        fake_args = FakeArgs()
+        fake_args.output = '-'
+        fake_args.format = 'csv'
+        
+        for key, value in resolved_params.items():
+            setattr(fake_args, key, value)
+        
+        if command == 'head':
+            cmd_head(fake_args)
+        elif command == 'tail':
+            cmd_tail(fake_args)
+        elif command == 'select':
+            cmd_select(fake_args)
+        elif command == 'where':
+            cmd_where(fake_args)
+        elif command == 'sort':
+            cmd_sort(fake_args)
+        elif command == 'groupby':
+            cmd_groupby(fake_args)
+        elif command == 'mutate':
+            cmd_mutate(fake_args)
+        elif command == 'fill':
+            cmd_fill(fake_args)
+        elif command == 'join':
+            cmd_join(fake_args)
+        elif command == 'concat':
+            cmd_concat(fake_args)
+        elif command == 'describe':
+            cmd_describe(fake_args)
+        elif command == 'validate':
+            cmd_validate(fake_args)
+        
+        if 'save_variables' in step:
+            for var_name, var_expr in step['save_variables'].items():
+                if var_expr.startswith('last_output_column:'):
+                    col_name = var_expr.split(':', 1)[1].strip()
+                    variables[var_name] = col_name
+                else:
+                    variables[var_name] = var_expr
+        
+        print(f"Step {i+1} completed")
+    
+    if not dry_run:
+        print("\nPipeline completed successfully")
+
+def cmd_report(args):
+    left_file = args.left
+    right_file = args.right
+    key_column = args.key
+    output_file = args.output
+    
+    left_rows = read_csv(left_file)
+    right_rows = read_csv(right_file)
+    
+    if not left_rows or not right_rows:
+        print("Error: One or both files are empty")
+        return
+    
+    left_index = {r.get(key_column, ''): r for r in left_rows}
+    right_index = {r.get(key_column, ''): r for r in right_rows}
+    
+    added = []
+    removed = []
+    modified = []
+    
+    for key, row in right_index.items():
+        if key not in left_index:
+            added.append(row)
+        else:
+            if left_index[key] != row:
+                modified.append({'old': left_index[key], 'new': row, 'key': key})
+    
+    for key, row in left_index.items():
+        if key not in right_index:
+            removed.append(row)
+    
+    col_modification_counts = {}
+    all_columns = set()
+    if left_rows:
+        all_columns.update(left_rows[0].keys())
+    if right_rows:
+        all_columns.update(right_rows[0].keys())
+    
+    for col in all_columns:
+        col_modification_counts[col] = 0
+    
+    for m in modified:
+        old = m['old']
+        new = m['new']
+        for col in all_columns:
+            if old.get(col, '') != new.get(col, ''):
+                col_modification_counts[col] += 1
+    
+    sorted_col_changes = sorted(col_modification_counts.items(), key=lambda x: x[1], reverse=True)
+    
+    md_lines = []
+    md_lines.append(f"# CSV对比报告")
+    md_lines.append(f"")
+    md_lines.append(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    md_lines.append(f"**左文件**: {left_file}")
+    md_lines.append(f"**右文件**: {right_file}")
+    md_lines.append(f"**主键列**: {key_column}")
+    md_lines.append(f"")
+    md_lines.append(f"## 概览")
+    md_lines.append(f"")
+    md_lines.append(f"| 变更类型 | 数量 |")
+    md_lines.append(f"| --- | --- |")
+    md_lines.append(f"| 新增行数 | {len(added)} |")
+    md_lines.append(f"| 删除行数 | {len(removed)} |")
+    md_lines.append(f"| 修改行数 | {len(modified)} |")
+    md_lines.append(f"")
+    md_lines.append(f"## 列变更统计")
+    md_lines.append(f"")
+    md_lines.append(f"| 列名 | 修改次数 |")
+    md_lines.append(f"| --- | --- |")
+    for col, count in sorted_col_changes:
+        if count > 0:
+            md_lines.append(f"| {col} | {count} |")
+    md_lines.append(f"")
+    md_lines.append(f"## 修改值对比（前20行）")
+    md_lines.append(f"")
+    
+    if modified:
+        sample_modified = modified[:20]
+        md_lines.append(f"| {key_column} | 变更类型 | 字段 | 旧值 | 新值 |")
+        md_lines.append(f"| --- | --- | --- | --- | --- |")
+        
+        for m in sample_modified:
+            diff_cols = []
+            for col in all_columns:
+                if m['old'].get(col, '') != m['new'].get(col, ''):
+                    diff_cols.append(col)
+            
+            for col in diff_cols:
+                old_val = m['old'].get(col, '')
+                new_val = m['new'].get(col, '')
+                md_lines.append(f"| {m['key']} | 修改 | {col} | {old_val} | {new_val} |")
+    else:
+        md_lines.append(f"无修改行")
+    
+    md_lines.append(f"")
+    md_lines.append(f"## 新增行（前20行）")
+    md_lines.append(f"")
+    
+    if added:
+        sample_added = added[:20]
+        if sample_added:
+            cols = list(sample_added[0].keys())
+            md_lines.append(f"| {' | '.join(cols)} |")
+            md_lines.append(f"| {' | '.join(['---'] * len(cols))} |")
+            for row in sample_added:
+                md_lines.append(f"| {' | '.join(str(row.get(c, '')) for c in cols)} |")
+    else:
+        md_lines.append(f"无新增行")
+    
+    md_lines.append(f"")
+    md_lines.append(f"## 删除行（前20行）")
+    md_lines.append(f"")
+    
+    if removed:
+        sample_removed = removed[:20]
+        if sample_removed:
+            cols = list(sample_removed[0].keys())
+            md_lines.append(f"| {' | '.join(cols)} |")
+            md_lines.append(f"| {' | '.join(['---'] * len(cols))} |")
+            for row in sample_removed:
+                md_lines.append(f"| {' | '.join(str(row.get(c, '')) for c in cols)} |")
+    else:
+        md_lines.append(f"无删除行")
+    
+    report_content = '\n'.join(md_lines)
+    
+    if output_file == '-':
+        print(report_content)
+    else:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(report_content)
+        print(f"报告已生成: {output_file}")
+
+def parse_sql_query(query):
+    query = query.strip()
+    
+    select_pattern = r'SELECT\s+(.+?)\s+FROM\s+(\w+)'
+    match = re.search(select_pattern, query, re.IGNORECASE)
+    if not match:
+        return None
+    
+    select_part = match.group(1)
+    table_name = match.group(2)
+    
+    columns = []
+    aggregations = {}
+    
+    if select_part.strip() == '*':
+        columns = ['*']
+    else:
+        for item in select_part.split(','):
+            item = item.strip()
+            as_match = re.search(r'(.+?)\s+AS\s+(\w+)', item, re.IGNORECASE)
+            if as_match:
+                expr = as_match.group(1).strip()
+                alias = as_match.group(2)
+            else:
+                expr = item
+                alias = item
+            
+            agg_match = re.match(r'(COUNT|SUM|AVG|MIN|MAX)\s*\(\s*(\w+)\s*\)', expr, re.IGNORECASE)
+            if agg_match:
+                func_name = agg_match.group(1).upper()
+                col_name = agg_match.group(2)
+                aggregations[alias] = (func_name, col_name)
+                columns.append(alias)
+            else:
+                columns.append(alias)
+    
+    where_clause = None
+    where_match = re.search(r'WHERE\s+(.+?)(?=\s+ORDER\s+BY|\s+GROUP\s+BY|\s+HAVING|\s+LIMIT|$)', query, re.IGNORECASE)
+    if where_match:
+        where_clause = where_match.group(1)
+    
+    order_by_clause = None
+    order_match = re.search(r'ORDER\s+BY\s+(.+?)(?=\s+GROUP\s+BY|\s+HAVING|\s+LIMIT|$)', query, re.IGNORECASE)
+    if order_match:
+        order_by_clause = order_match.group(1)
+    
+    group_by_clause = None
+    group_match = re.search(r'GROUP\s+BY\s+(.+?)(?=\s+HAVING|\s+ORDER\s+BY|\s+LIMIT|$)', query, re.IGNORECASE)
+    if group_match:
+        group_by_clause = group_match.group(1)
+    
+    having_clause = None
+    having_match = re.search(r'HAVING\s+(.+?)(?=\s+ORDER\s+BY|\s+LIMIT|$)', query, re.IGNORECASE)
+    if having_match:
+        having_clause = having_match.group(1)
+    
+    limit_clause = None
+    limit_match = re.search(r'LIMIT\s+(\d+)', query, re.IGNORECASE)
+    if limit_match:
+        limit_clause = int(limit_match.group(1))
+    
+    return {
+        'select': columns,
+        'aggregations': aggregations,
+        'where': where_clause,
+        'order_by': order_by_clause,
+        'group_by': group_by_clause,
+        'having': having_clause,
+        'limit': limit_clause,
+        'table': table_name
+    }
+
+def parse_where_condition(condition):
+    conditions = []
+    
+    or_parts = re.split(r'\s+OR\s+', condition, flags=re.IGNORECASE)
+    for or_part in or_parts:
+        and_parts = re.split(r'\s+AND\s+', or_part, flags=re.IGNORECASE)
+        and_conditions = []
+        
+        for part in and_parts:
+            part = part.strip()
+            
+            operators = [('>=', 'ge'), ('<=', 'le'), ('!=', 'ne'), ('<>', 'ne'), 
+                         ('==', 'eq'), ('=', 'eq'), ('>', 'gt'), ('<', 'lt'),
+                         ('IN', 'in'), ('LIKE', 'like')]
+            
+            matched = False
+            for op, op_name in operators:
+                op_regex = re.escape(op)
+                if op_name == 'in':
+                    pattern = rf'(\w+)\s+{op_regex}\s*\((.+?)\)'
+                    match = re.match(pattern, part, re.IGNORECASE)
+                    if match:
+                        col = match.group(1)
+                        values = [v.strip().strip('\'"') for v in match.group(2).split(',')]
+                        and_conditions.append((col, op_name, values))
+                        matched = True
+                        break
+                elif op_name == 'like':
+                    pattern = rf'(\w+)\s+{op_regex}\s*[\'"](.+?)[\'"]'
+                    match = re.match(pattern, part, re.IGNORECASE)
+                    if match:
+                        col = match.group(1)
+                        pattern = match.group(2).replace('%', '.*')
+                        and_conditions.append((col, op_name, pattern))
+                        matched = True
+                        break
+                else:
+                    pattern = rf'(\w+)\s*{op_regex}\s*[\'"](.+?)[\'"]'
+                    match = re.match(pattern, part)
+                    if match:
+                        col = match.group(1)
+                        value = match.group(2)
+                        and_conditions.append((col, op_name, value))
+                        matched = True
+                        break
+            
+            if not matched:
+                and_conditions.append(('unknown', 'unknown', part))
+        
+        conditions.append(and_conditions)
+    
+    return conditions
+
+def eval_sql_condition(row, conditions):
+    for or_group in conditions:
+        and_result = True
+        for col, op, value in or_group:
+            row_val = row.get(col, '')
+            
+            if op == 'gt':
+                try:
+                    and_result = float(row_val) > float(value)
+                except:
+                    and_result = str(row_val) > str(value)
+            elif op == 'lt':
+                try:
+                    and_result = float(row_val) < float(value)
+                except:
+                    and_result = str(row_val) < str(value)
+            elif op == 'ge':
+                try:
+                    and_result = float(row_val) >= float(value)
+                except:
+                    and_result = str(row_val) >= str(value)
+            elif op == 'le':
+                try:
+                    and_result = float(row_val) <= float(value)
+                except:
+                    and_result = str(row_val) <= str(value)
+            elif op == 'eq':
+                and_result = str(row_val) == str(value)
+            elif op == 'ne':
+                and_result = str(row_val) != str(value)
+            elif op == 'in':
+                and_result = str(row_val) in value
+            elif op == 'like':
+                and_result = bool(re.search(value, str(row_val)))
+            
+            if not and_result:
+                break
+        
+        if and_result:
+            return True
+    
+    return False
+
+def cmd_sql(args):
+    file = args.file
+    query = args.query
+    output = args.output
+    output_format = args.format
+    
+    rows = read_csv(file)
+    if not rows:
+        print("No data to query")
+        return
+    
+    parsed = parse_sql_query(query)
+    if not parsed:
+        print("Invalid SQL query")
+        return
+    
+    filtered_rows = rows[:]
+    
+    if parsed['where']:
+        conditions = parse_where_condition(parsed['where'])
+        filtered_rows = [row for row in filtered_rows if eval_sql_condition(row, conditions)]
+    
+    if parsed['group_by']:
+        group_cols = [c.strip() for c in parsed['group_by'].split(',')]
+        
+        groups = {}
+        for row in filtered_rows:
+            key = tuple(row.get(c.strip(), '') for c in group_cols)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(row)
+        
+        agg_results = []
+        for key, group_rows in groups.items():
+            result = dict(zip(group_cols, key))
+            
+            for alias, (func_name, col_name) in parsed['aggregations'].items():
+                values = []
+                for r in group_rows:
+                    try:
+                        values.append(float(r.get(col_name, '')))
+                    except:
+                        pass
+                
+                if func_name == 'COUNT':
+                    result[alias] = len(group_rows)
+                elif func_name == 'SUM':
+                    result[alias] = sum(values)
+                elif func_name == 'AVG':
+                    result[alias] = sum(values) / len(values) if values else 0
+                elif func_name == 'MIN':
+                    result[alias] = min(values) if values else ''
+                elif func_name == 'MAX':
+                    result[alias] = max(values) if values else ''
+            
+            if parsed['having']:
+                having_conditions = parse_where_condition(parsed['having'])
+                if not eval_sql_condition(result, having_conditions):
+                    continue
+            
+            agg_results.append(result)
+        
+        filtered_rows = agg_results
+    elif parsed['aggregations']:
+        result = {}
+        for alias, (func_name, col_name) in parsed['aggregations'].items():
+            values = []
+            for row in filtered_rows:
+                try:
+                    values.append(float(row.get(col_name, '')))
+                except:
+                    pass
+            
+            if func_name == 'COUNT':
+                result[alias] = len(filtered_rows)
+            elif func_name == 'SUM':
+                result[alias] = sum(values)
+            elif func_name == 'AVG':
+                result[alias] = sum(values) / len(values) if values else 0
+            elif func_name == 'MIN':
+                result[alias] = min(values) if values else ''
+            elif func_name == 'MAX':
+                result[alias] = max(values) if values else ''
+        
+        filtered_rows = [result]
+    
+    if parsed['order_by']:
+        sort_specs = parsed['order_by'].split(',')
+        key_funcs = []
+        reverse_flags = []
+        
+        for spec in sort_specs:
+            spec = spec.strip()
+            parts = spec.split()
+            col = parts[0]
+            reverse = len(parts) > 1 and parts[1].upper() == 'DESC'
+            
+            key_funcs.append(col)
+            reverse_flags.append(reverse)
+        
+        def sort_key(row):
+            keys = []
+            for i, col in enumerate(key_funcs):
+                val = row.get(col, '')
+                try:
+                    keys.append(float(val))
+                except:
+                    keys.append(val)
+            return keys
+        
+        filtered_rows.sort(key=sort_key, reverse=any(reverse_flags))
+    
+    if parsed['limit']:
+        filtered_rows = filtered_rows[:parsed['limit']]
+    
+    select_cols = parsed['select']
+    if select_cols and '*' not in select_cols and not parsed['group_by'] and not parsed['aggregations']:
+        new_rows = []
+        for row in filtered_rows:
+            new_row = {}
+            for c in select_cols:
+                if c in row:
+                    new_row[c] = row[c]
+            new_rows.append(new_row)
+        filtered_rows = new_rows
+    
+    write_csv(filtered_rows, output, output_format)
+
 def main():
     parser = argparse.ArgumentParser(prog='csvrack', description='CSV data processing tool')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -1226,6 +1745,22 @@ def main():
     p_mask.add_argument('-s', '--seed', type=int, help='Seed for repeatable hash')
     p_mask.add_argument('-o', '--output', default='-', help='Output file')
     
+    p_pipeline = subparsers.add_parser('pipeline', help='Run data processing pipeline')
+    p_pipeline.add_argument('config', help='YAML pipeline configuration file')
+    p_pipeline.add_argument('--dry-run', action='store_true', help='Preview steps without executing')
+    
+    p_report = subparsers.add_parser('report', help='Generate comparison report between two CSV files')
+    p_report.add_argument('left', help='Left CSV file (old version)')
+    p_report.add_argument('right', help='Right CSV file (new version)')
+    p_report.add_argument('-k', '--key', required=True, help='Key column for row matching')
+    p_report.add_argument('-o', '--output', default='-', help='Output file for the report')
+    
+    p_sql = subparsers.add_parser('sql', help='Query CSV file with SQL-like syntax')
+    p_sql.add_argument('file', help='Input CSV file')
+    p_sql.add_argument('query', help='SQL query string')
+    p_sql.add_argument('-o', '--output', default='-', help='Output file')
+    p_sql.add_argument('-f', '--format', default='csv', choices=['csv', 'tsv', 'json', 'markdown', 'sql'], help='Output format')
+    
     args = parser.parse_args()
     
     if args.command == 'head':
@@ -1278,6 +1813,12 @@ def main():
         cmd_chart(args)
     elif args.command == 'mask':
         cmd_mask(args)
+    elif args.command == 'pipeline':
+        cmd_pipeline(args)
+    elif args.command == 'report':
+        cmd_report(args)
+    elif args.command == 'sql':
+        cmd_sql(args)
     else:
         parser.print_help()
 
