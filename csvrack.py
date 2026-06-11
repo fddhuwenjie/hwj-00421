@@ -1316,7 +1316,7 @@ def parse_sql_query(query):
                 expr = item
                 alias = item
             
-            agg_match = re.match(r'(COUNT|SUM|AVG|MIN|MAX)\s*\(\s*(\w+)\s*\)', expr, re.IGNORECASE)
+            agg_match = re.match(r'(COUNT|SUM|AVG|MIN|MAX)\s*\(\s*(\*|\w+)\s*\)', expr, re.IGNORECASE)
             if agg_match:
                 func_name = agg_match.group(1).upper()
                 col_name = agg_match.group(2)
@@ -1479,6 +1479,8 @@ def cmd_sql(args):
         conditions = parse_where_condition(parsed['where'])
         filtered_rows = [row for row in filtered_rows if eval_sql_condition(row, conditions)]
     
+    has_aggregations = len(parsed['aggregations']) > 0
+    
     if parsed['group_by']:
         group_cols = [c.strip() for c in parsed['group_by'].split(',')]
         
@@ -1494,23 +1496,31 @@ def cmd_sql(args):
             result = dict(zip(group_cols, key))
             
             for alias, (func_name, col_name) in parsed['aggregations'].items():
-                values = []
-                for r in group_rows:
-                    try:
-                        values.append(float(r.get(col_name, '')))
-                    except:
-                        pass
-                
                 if func_name == 'COUNT':
-                    result[alias] = len(group_rows)
-                elif func_name == 'SUM':
-                    result[alias] = sum(values)
-                elif func_name == 'AVG':
-                    result[alias] = sum(values) / len(values) if values else 0
-                elif func_name == 'MIN':
-                    result[alias] = min(values) if values else ''
-                elif func_name == 'MAX':
-                    result[alias] = max(values) if values else ''
+                    if col_name == '*':
+                        result[alias] = len(group_rows)
+                    else:
+                        count = 0
+                        for r in group_rows:
+                            if r.get(col_name, '').strip():
+                                count += 1
+                        result[alias] = count
+                else:
+                    values = []
+                    for r in group_rows:
+                        try:
+                            values.append(float(r.get(col_name, '')))
+                        except:
+                            pass
+                    
+                    if func_name == 'SUM':
+                        result[alias] = sum(values)
+                    elif func_name == 'AVG':
+                        result[alias] = sum(values) / len(values) if values else 0
+                    elif func_name == 'MIN':
+                        result[alias] = min(values) if values else ''
+                    elif func_name == 'MAX':
+                        result[alias] = max(values) if values else ''
             
             if parsed['having']:
                 having_conditions = parse_where_condition(parsed['having'])
@@ -1520,26 +1530,34 @@ def cmd_sql(args):
             agg_results.append(result)
         
         filtered_rows = agg_results
-    elif parsed['aggregations']:
+    elif has_aggregations:
         result = {}
         for alias, (func_name, col_name) in parsed['aggregations'].items():
-            values = []
-            for row in filtered_rows:
-                try:
-                    values.append(float(row.get(col_name, '')))
-                except:
-                    pass
-            
             if func_name == 'COUNT':
-                result[alias] = len(filtered_rows)
-            elif func_name == 'SUM':
-                result[alias] = sum(values)
-            elif func_name == 'AVG':
-                result[alias] = sum(values) / len(values) if values else 0
-            elif func_name == 'MIN':
-                result[alias] = min(values) if values else ''
-            elif func_name == 'MAX':
-                result[alias] = max(values) if values else ''
+                if col_name == '*':
+                    result[alias] = len(filtered_rows)
+                else:
+                    count = 0
+                    for row in filtered_rows:
+                        if row.get(col_name, '').strip():
+                            count += 1
+                    result[alias] = count
+            else:
+                values = []
+                for row in filtered_rows:
+                    try:
+                        values.append(float(row.get(col_name, '')))
+                    except:
+                        pass
+                
+                if func_name == 'SUM':
+                    result[alias] = sum(values)
+                elif func_name == 'AVG':
+                    result[alias] = sum(values) / len(values) if values else 0
+                elif func_name == 'MIN':
+                    result[alias] = min(values) if values else ''
+                elif func_name == 'MAX':
+                    result[alias] = max(values) if values else ''
         
         filtered_rows = [result]
     
@@ -1573,7 +1591,7 @@ def cmd_sql(args):
         filtered_rows = filtered_rows[:parsed['limit']]
     
     select_cols = parsed['select']
-    if select_cols and '*' not in select_cols and not parsed['group_by'] and not parsed['aggregations']:
+    if select_cols and '*' not in select_cols and not has_aggregations:
         new_rows = []
         for row in filtered_rows:
             new_row = {}
