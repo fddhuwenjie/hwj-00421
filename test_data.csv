@@ -1,0 +1,11 @@
+name,email,phone,age,score,join_date
+张三,zhangsan@example.com,13812345678,25,85.5,2024-01-15
+李四,lisi@example.com,13987654321,30,92.0,2024-02-20
+王五,wangwu@example.com,13711112222,28,78.5,2024-03-10
+赵六,zhaoliu@example.com,13633334444,35,88.0,2024-04-05
+钱七,qianqi@example.com,13555556666,22,95.0,2024-05-18
+张三,zhangsan@example.com,13812345678,25,85.5,2024-01-15
+孙八,sunba@example.com,13477778888,27,text,2024-06-22
+周九,zhoujiu,13399990000,29,82.0,2024-07-30
+吴十,wushi@example.com,13211112222,,77.5,2024-08-15
+郑十一,zheng11@example.com,13133334444,31,90.0,invalid_date

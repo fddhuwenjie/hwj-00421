@@ -6,8 +6,10 @@ import re
 import random
 import json
 import statistics
+import hashlib
 from collections import Counter
 from datetime import datetime
+import shutil
 
 def read_csv(filepath):
     if filepath == '-':
@@ -680,6 +682,378 @@ def cmd_split_file(args):
         write_csv(group_rows, filename, 'csv')
         print(f"Wrote {len(group_rows)} rows to {filename}")
 
+def is_email(value):
+    return '@' in str(value) if value else False
+
+def is_valid_date(value):
+    if not value:
+        return False
+    formats = ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%d %H:%M:%S', '%Y/%m/%d %H:%M:%S']
+    for fmt in formats:
+        try:
+            datetime.strptime(str(value), fmt)
+            return True
+        except:
+            pass
+    return False
+
+def cmd_validate(args):
+    rows = read_csv(args.file)
+    if not rows:
+        print("No data to validate")
+        return
+    
+    threshold = args.threshold
+    issues = {
+        'empty_ratio': {},
+        'type_mismatch': {},
+        'duplicates': [],
+        'format_errors': {}
+    }
+    
+    fields = rows[0].keys()
+    total_rows = len(rows)
+    
+    for field in fields:
+        issues['empty_ratio'][field] = {'count': 0, 'rows': []}
+        issues['type_mismatch'][field] = {'count': 0, 'rows': [], 'expected_type': None}
+        issues['format_errors'][field] = {'count': 0, 'rows': [], 'errors': []}
+    
+    type_counts = {f: Counter() for f in fields}
+    
+    for idx, row in enumerate(rows):
+        row_num = idx + 2
+        
+        for field in fields:
+            value = row.get(field, '')
+            
+            if not value or value.strip() == '':
+                issues['empty_ratio'][field]['count'] += 1
+                issues['empty_ratio'][field]['rows'].append(row_num)
+            
+            inferred = infer_type(value)
+            if inferred != 'null':
+                type_counts[field][inferred] += 1
+        
+        for field in fields:
+            value = row.get(field, '')
+            inferred = infer_type(value)
+            
+            if type_counts[field]:
+                expected_type = type_counts[field].most_common(1)[0][0]
+                issues['type_mismatch'][field]['expected_type'] = expected_type
+                if inferred != 'null' and inferred != expected_type:
+                    issues['type_mismatch'][field]['count'] += 1
+                    issues['type_mismatch'][field]['rows'].append(row_num)
+            
+            if '@' in field.lower():
+                if value and not is_email(value):
+                    issues['format_errors'][field]['count'] += 1
+                    issues['format_errors'][field]['rows'].append(row_num)
+                    issues['format_errors'][field]['errors'].append(f"'{value}' is not a valid email")
+            elif 'date' in field.lower():
+                if value and not is_valid_date(value):
+                    issues['format_errors'][field]['count'] += 1
+                    issues['format_errors'][field]['rows'].append(row_num)
+                    issues['format_errors'][field]['errors'].append(f"'{value}' is not a valid date")
+    
+    seen = set()
+    for idx, row in enumerate(rows):
+        row_num = idx + 2
+        row_tuple = tuple((k, row[k]) for k in sorted(row.keys()))
+        if row_tuple in seen:
+            issues['duplicates'].append(row_num)
+        seen.add(row_tuple)
+    
+    has_issues = False
+    
+    print("=" * 60)
+    print("DATA QUALITY REPORT")
+    print("=" * 60)
+    
+    print("\n1. Empty Value Check (threshold: {}%)".format(threshold * 100))
+    print("-" * 60)
+    for field in fields:
+        count = issues['empty_ratio'][field]['count']
+        ratio = count / total_rows if total_rows > 0 else 0
+        if ratio > threshold:
+            has_issues = True
+            print(f"[WARN] Column '{field}': {count} empty values ({ratio:.1%})")
+            print(f"       Rows: {issues['empty_ratio'][field]['rows']}")
+    
+    print("\n2. Type Consistency Check")
+    print("-" * 60)
+    for field in fields:
+        count = issues['type_mismatch'][field]['count']
+        if count > 0:
+            has_issues = True
+            expected = issues['type_mismatch'][field]['expected_type']
+            print(f"[WARN] Column '{field}': {count} type mismatches (expected: {expected})")
+            print(f"       Rows: {issues['type_mismatch'][field]['rows']}")
+    
+    print("\n3. Duplicate Rows Check")
+    print("-" * 60)
+    if issues['duplicates']:
+        has_issues = True
+        print(f"[WARN] Found {len(issues['duplicates'])} duplicate rows")
+        print(f"       Rows: {issues['duplicates']}")
+    else:
+        print("[OK] No duplicate rows")
+    
+    print("\n4. Format Validation")
+    print("-" * 60)
+    for field in fields:
+        count = issues['format_errors'][field]['count']
+        if count > 0:
+            has_issues = True
+            print(f"[WARN] Column '{field}': {count} format errors")
+            for i, row_num in enumerate(issues['format_errors'][field]['rows']):
+                print(f"       Row {row_num}: {issues['format_errors'][field]['errors'][i]}")
+    
+    print("\n" + "=" * 60)
+    if has_issues:
+        print("SUMMARY: Data quality issues detected!")
+    else:
+        print("SUMMARY: No data quality issues found.")
+    print("=" * 60)
+    
+    if args.fix:
+        print("\nApplying automatic fixes...")
+        
+        seen = set()
+        fixed_rows = []
+        for idx, row in enumerate(rows):
+            row_tuple = tuple((k, row[k]) for k in sorted(row.keys()))
+            if row_tuple in seen:
+                continue
+            seen.add(row_tuple)
+            
+            for field in fields:
+                value = row.get(field, '')
+                if value:
+                    inferred = infer_type(value)
+                    expected_type = type_counts[field].most_common(1)[0][0] if type_counts[field] else 'str'
+                    if inferred != expected_type:
+                        row[field] = ''
+            
+            fixed_rows.append(row)
+        
+        print(f"Removed {len(rows) - len(fixed_rows)} duplicate rows")
+        print(f"Fixed type inconsistencies in various columns")
+        
+        write_csv(fixed_rows, args.output, 'csv')
+        print(f"Fixed data written to {args.output}")
+
+def cmd_chart(args):
+    rows = read_csv(args.file)
+    if not rows:
+        print("No data to chart")
+        return
+    
+    chart_type = args.type
+    x_col = args.x
+    y_col = args.y
+    top_n = args.top
+    
+    terminal_width = shutil.get_terminal_size().columns
+    
+    if chart_type == 'bar':
+        data = []
+        for row in rows:
+            x_val = row.get(x_col, '')
+            try:
+                y_val = float(row.get(y_col, 0))
+                data.append((x_val, y_val))
+            except:
+                continue
+        
+        if top_n:
+            data.sort(key=lambda x: x[1], reverse=True)
+            data = data[:top_n]
+        
+        if not data:
+            print("No valid data for bar chart")
+            return
+        
+        max_val = max(d[1] for d in data)
+        label_width = max(len(str(d[0])) for d in data)
+        chart_width = terminal_width - label_width - 10
+        
+        print("=" * terminal_width)
+        print(f"BAR CHART: {y_col} by {x_col}")
+        print("=" * terminal_width)
+        
+        for label, value in data:
+            bar_length = int((value / max_val) * chart_width)
+            bar = '=' * bar_length
+            print(f"{str(label):<{label_width}} | {bar} {value:.2f}")
+    
+    elif chart_type == 'hist':
+        values = []
+        for row in rows:
+            try:
+                values.append(float(row.get(x_col, 0)))
+            except:
+                continue
+        
+        if not values:
+            print("No valid numeric data for histogram")
+            return
+        
+        min_val = min(values)
+        max_val = max(values)
+        range_val = max_val - min_val
+        
+        if range_val == 0:
+            print("All values are identical")
+            return
+        
+        num_bins = min(20, terminal_width // 5)
+        bins = [min_val + (i * range_val / num_bins) for i in range(num_bins + 1)]
+        
+        counts = [0] * num_bins
+        for val in values:
+            for i in range(num_bins):
+                if bins[i] <= val < bins[i+1]:
+                    counts[i] += 1
+                    break
+        
+        max_count = max(counts)
+        chart_width = terminal_width - 20
+        
+        print("=" * terminal_width)
+        print(f"HISTOGRAM: {x_col}")
+        print("=" * terminal_width)
+        
+        for i in range(num_bins):
+            count = counts[i]
+            bar_length = int((count / max_count) * chart_width) if max_count > 0 else 0
+            bar = '=' * bar_length
+            bin_label = f"{bins[i]:.2f}-{bins[i+1]:.2f}"
+            print(f"{bin_label:15} | {bar} {count}")
+    
+    elif chart_type == 'scatter':
+        points = []
+        for row in rows:
+            try:
+                x_val = float(row.get(x_col, 0))
+                y_val = float(row.get(y_col, 0))
+                points.append((x_val, y_val))
+            except:
+                continue
+        
+        if not points:
+            print("No valid data for scatter plot")
+            return
+        
+        x_vals = [p[0] for p in points]
+        y_vals = [p[1] for p in points]
+        
+        min_x, max_x = min(x_vals), max(x_vals)
+        min_y, max_y = min(y_vals), max(y_vals)
+        
+        x_range = max_x - min_x if max_x != min_x else 1
+        y_range = max_y - min_y if max_y != min_y else 1
+        
+        chart_width = terminal_width - 10
+        chart_height = 20
+        
+        grid = [[' ' for _ in range(chart_width)] for _ in range(chart_height)]
+        
+        for x, y in points:
+            x_pos = int(((x - min_x) / x_range) * (chart_width - 1))
+            y_pos = chart_height - 1 - int(((y - min_y) / y_range) * (chart_height - 1))
+            
+            if 0 <= x_pos < chart_width and 0 <= y_pos < chart_height:
+                grid[y_pos][x_pos] = '*'
+        
+        print("=" * terminal_width)
+        print(f"SCATTER PLOT: {y_col} vs {x_col}")
+        print("=" * terminal_width)
+        
+        for row in grid:
+            print(''.join(row))
+    
+    else:
+        print(f"Unknown chart type: {chart_type}")
+
+def cmd_mask(args):
+    rows = read_csv(args.file)
+    if not rows:
+        print("No data to mask")
+        return
+    
+    columns = args.columns.split(',') if args.columns else []
+    seed = args.seed
+    
+    if seed:
+        random.seed(seed)
+    
+    column_rules = {}
+    for col_spec in columns:
+        parts = col_spec.split(':')
+        if len(parts) == 2:
+            col_name = parts[0].strip()
+            rule = parts[1].strip()
+            column_rules[col_name] = rule
+    
+    default_rule = args.rule
+    
+    def mask_email(value):
+        if not value or '@' not in value:
+            return value
+        parts = value.split('@')
+        username = parts[0]
+        domain = parts[1]
+        masked = '*' * len(username) + '@' + domain
+        return masked
+    
+    def mask_phone(value):
+        value = str(value).strip()
+        digits = re.sub(r'\D', '', value)
+        if len(digits) == 11:
+            return digits[:3] + '****' + digits[-4:]
+        elif len(digits) == 8:
+            return '****' + digits[-4:]
+        return value
+    
+    def mask_name(value):
+        if not value:
+            return value
+        value = str(value).strip()
+        if len(value) == 1:
+            return value
+        return value[0] + '*' * (len(value) - 1)
+    
+    def mask_id(value):
+        value = str(value).strip()
+        if len(value) <= 6:
+            return '*' * len(value)
+        return value[:3] + '*' * (len(value) - 6) + value[-3:]
+    
+    def mask_hash(value):
+        if not value:
+            return value
+        if seed:
+            value = str(seed) + str(value)
+        return hashlib.sha256(str(value).encode()).hexdigest()
+    
+    mask_functions = {
+        'email': mask_email,
+        'phone': mask_phone,
+        'name': mask_name,
+        'id': mask_id,
+        'hash': mask_hash
+    }
+    
+    for row in rows:
+        for col in row.keys():
+            rule = column_rules.get(col, default_rule)
+            if rule and rule in mask_functions:
+                row[col] = mask_functions[rule](row[col])
+    
+    write_csv(rows, args.output, 'csv')
+
 def main():
     parser = argparse.ArgumentParser(prog='csvrack', description='CSV data processing tool')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -820,6 +1194,26 @@ def main():
     p_split_file.add_argument('file', help='Input CSV file')
     p_split_file.add_argument('column', help='Column to split by')
     
+    p_validate = subparsers.add_parser('validate', help='Validate data quality')
+    p_validate.add_argument('file', nargs='?', default='-', help='Input CSV file')
+    p_validate.add_argument('-t', '--threshold', type=float, default=0.3, help='Empty value threshold ratio')
+    p_validate.add_argument('--fix', action='store_true', help='Auto fix issues')
+    p_validate.add_argument('-o', '--output', default='-', help='Output file for fixed data')
+    
+    p_chart = subparsers.add_parser('chart', help='Generate text chart')
+    p_chart.add_argument('file', nargs='?', default='-', help='Input CSV file')
+    p_chart.add_argument('type', choices=['bar', 'hist', 'scatter'], help='Chart type')
+    p_chart.add_argument('-x', required=True, help='X column')
+    p_chart.add_argument('-y', help='Y column (required for bar/scatter)')
+    p_chart.add_argument('--top', type=int, help='Show top N items')
+    
+    p_mask = subparsers.add_parser('mask', help='Mask sensitive data')
+    p_mask.add_argument('file', nargs='?', default='-', help='Input CSV file')
+    p_mask.add_argument('-r', '--rule', choices=['email', 'phone', 'name', 'id', 'hash'], help='Default mask rule')
+    p_mask.add_argument('-c', '--columns', help='Column-specific rules (e.g., email:email,phone:phone)')
+    p_mask.add_argument('-s', '--seed', type=int, help='Seed for repeatable hash')
+    p_mask.add_argument('-o', '--output', default='-', help='Output file')
+    
     args = parser.parse_args()
     
     if args.command == 'head':
@@ -866,6 +1260,12 @@ def main():
         cmd_diff(args)
     elif args.command == 'split-file':
         cmd_split_file(args)
+    elif args.command == 'validate':
+        cmd_validate(args)
+    elif args.command == 'chart':
+        cmd_chart(args)
+    elif args.command == 'mask':
+        cmd_mask(args)
     else:
         parser.print_help()
 
