@@ -859,13 +859,21 @@ def cmd_chart(args):
     
     if chart_type == 'bar':
         data = []
-        for row in rows:
-            x_val = row.get(x_col, '')
-            try:
-                y_val = float(row.get(y_col, 0))
-                data.append((x_val, y_val))
-            except:
-                continue
+        
+        if y_col:
+            for row in rows:
+                x_val = row.get(x_col, '')
+                try:
+                    y_val = float(row.get(y_col, 0))
+                    data.append((x_val, y_val))
+                except:
+                    continue
+        else:
+            x_counts = Counter()
+            for row in rows:
+                x_val = row.get(x_col, '')
+                x_counts[x_val] += 1
+            data = list(x_counts.items())
         
         if top_n:
             data.sort(key=lambda x: x[1], reverse=True)
@@ -880,11 +888,15 @@ def cmd_chart(args):
         chart_width = terminal_width - label_width - 10
         
         print("=" * terminal_width)
-        print(f"BAR CHART: {y_col} by {x_col}")
+        y_label = y_col if y_col else 'count'
+        print(f"BAR CHART: {y_label} by {x_col}")
         print("=" * terminal_width)
         
         for label, value in data:
-            bar_length = int((value / max_val) * chart_width)
+            if max_val == 0:
+                bar_length = 0
+            else:
+                bar_length = int((value / max_val) * chart_width)
             bar = '=' * bar_length
             print(f"{str(label):<{label_width}} | {bar} {value:.2f}")
     
